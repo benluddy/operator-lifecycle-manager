@@ -12,5 +12,5 @@ jobs:
         echo "https://${{ github.actor }}:${{ github.token }}@github.com" >> "${HOME}/.git-credentials"
         git config --global credential.helper store
         git clone "https://github.com/${{ github.repository }}.git" -b master
-        git remote add -f upstream https://github.com/operator-framework/operator-lifecycle-manager.git
-        git merge --ff-only upstream/master
+        git -C ${{ github.repository }} remote add -f upstream https://github.com/operator-framework/operator-lifecycle-manager.git
+        git -C ${{ github.repository }} merge --ff-only upstream/master
