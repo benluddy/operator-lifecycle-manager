@@ -1,7 +1,7 @@
 name: Upstream Sync
 on:
   schedule:
-  - cron: '*/5 * * * *'
+  - cron: '*/2 * * * *'
 jobs:
   clone:
     name: Sync
@@ -9,8 +9,8 @@ jobs:
     steps:
     - name: foo
       run: |
-        echo "https://${{github.actor}}:${{github.token}}@github.com" >> "${HOME}/.git-credentials"
+        echo "https://${{ github.actor }}:${{ github.token }}@github.com" >> "${HOME}/.git-credentials"
         git config --global credential.helper store
-        git clone "https://github.com/${{github.repository}}.git"
+        git clone "https://github.com/${{ github.repository }}.git"
         git remote add -f upstream https://github.com/operator-framework/operator-lifecycle-manager.git
         git merge --ff-only upstream/master
