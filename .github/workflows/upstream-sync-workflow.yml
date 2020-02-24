@@ -1,7 +1,7 @@
 name: Upstream Sync
 on:
   schedule:
-  - cron: '*/15 * * * *'
+  - cron: '*/5 * * * *'
 jobs:
   clone:
     name: Sync
