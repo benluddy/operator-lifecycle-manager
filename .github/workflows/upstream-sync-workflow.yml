@@ -14,3 +14,4 @@ jobs:
         git clone "https://github.com/${{ github.repository }}.git" -b master repo
         git -C repo remote add -f upstream https://github.com/operator-framework/operator-lifecycle-manager.git
         git -C repo merge --ff-only upstream/master
+        git -C repo push origin master
