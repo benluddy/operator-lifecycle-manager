@@ -12,7 +12,7 @@ require (
 	github.com/go-bindata/go-bindata/v3 v3.1.3
 	github.com/go-logr/logr v0.3.0
 	github.com/go-openapi/spec v0.19.4
-	github.com/golang/mock v1.4.1
+	github.com/golang/mock v1.5.0
 	github.com/google/go-cmp v0.5.2
 	github.com/googleapis/gnostic v0.5.1
 	github.com/irifrance/gini v1.0.1
@@ -26,7 +26,7 @@ require (
 	github.com/onsi/gomega v1.10.2
 	github.com/openshift/api v0.0.0-20200331152225-585af27e34fd
 	github.com/openshift/client-go v0.0.0-20200326155132-2a6cd50aedd0
-	github.com/operator-framework/api v0.6.0
+	github.com/operator-framework/api v0.7.0
 	github.com/operator-framework/operator-registry v1.13.6
 	github.com/otiai10/copy v1.2.0
 	github.com/pkg/errors v0.9.1
@@ -63,10 +63,6 @@ replace (
 	// controller runtime
 	github.com/openshift/api => github.com/openshift/api v0.0.0-20200331152225-585af27e34fd // release-4.5
 	github.com/openshift/client-go => github.com/openshift/client-go v0.0.0-20200326155132-2a6cd50aedd0 // release-4.5
-
-	// TODO: Remove when operator-framework/api has the cleanup API in a tagged release
-	// pinned for using APIs from feature branch "add-csv-cleanup-api"
-	github.com/operator-framework/api => github.com/hasbro17/api v0.3.13-0.20210304212710-93ba7a75566c
 
 	// pinned because latest etcd does not yet work with the latest grpc version (1.30.0)
 	go.etcd.io/etcd => go.etcd.io/etcd v0.5.0-alpha.5.0.20200520232829-54ba9589114f

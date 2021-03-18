@@ -699,6 +699,7 @@ func (a *Operator) ensureCSVsInNamespaces(csv *v1alpha1.ClusterServiceVersion, o
 }
 
 func (a *Operator) copyToNamespace(csv *v1alpha1.ClusterServiceVersion, namespace string) (*v1alpha1.ClusterServiceVersion, error) {
+	// TODO: .spec.cleanup should not be copied
 	if csv.GetNamespace() == namespace {
 		return nil, fmt.Errorf("bug: can not copy to active namespace %v", csv.GetNamespace())
 	}

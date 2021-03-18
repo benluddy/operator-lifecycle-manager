@@ -16,7 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
 	v1 "k8s.io/api/core/v1"
-
+	"k8s.io/client-go/dynamic"
 	"k8s.io/klog"
 
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/api/client/clientset/versioned"
@@ -200,6 +200,10 @@ func main() {
 	if err != nil {
 		logger.WithError(err).Fatal("error configuring custom resource client")
 	}
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		logger.WithError(err).Fatal("error configuring dynamic client")
+	}
 
 	cleanup(logger, opClient, crClient)
 
@@ -213,6 +217,7 @@ func main() {
 		olm.WithOperatorClient(opClient),
 		olm.WithRestConfig(config),
 		olm.WithConfigClient(versionedConfigClient),
+		olm.WithDynamicClient(dynamicClient),
 	)
 	if err != nil {
 		logger.WithError(err).Fatalf("error configuring operator")

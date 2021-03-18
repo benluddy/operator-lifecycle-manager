@@ -4,17 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"time"
 
-	v1 "github.com/operator-framework/api/pkg/operators/v1"
 	"github.com/sirupsen/logrus"
 	log "github.com/sirupsen/logrus"
+
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	extinf "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,11 +29,13 @@ import (
 	apiregistrationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	kagg "k8s.io/kube-aggregator/pkg/client/informers/externalversions"
 
+	v1 "github.com/operator-framework/api/pkg/operators/v1"
 	"github.com/operator-framework/api/pkg/operators/v1alpha1"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/api/client/clientset/versioned"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/api/client/informers/externalversions"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/controller/certs"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/controller/install"
+	"github.com/operator-framework/operator-lifecycle-manager/pkg/controller/operators/olm/finalizers"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/controller/operators/olm/overrides"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/controller/registry/resolver"
 	csvutility "github.com/operator-framework/operator-lifecycle-manager/pkg/lib/csv"
@@ -53,7 +53,6 @@ import (
 )
 
 const (
-	CleanupFinalizer = "operatorframework.io/cleanup-apis"
 	// MaxCRListSize is used to limit the number of CRs displayed
 	// on the status.cleanup.pendingDeletion block
 	// This prevents the CSV size from exceeding limits in the event of
@@ -94,6 +93,7 @@ type Operator struct {
 	serviceAccountSyncer  *scoped.UserDefinedServiceAccountSyncer
 	clientAttenuator      *scoped.ClientAttenuator
 	serviceAccountQuerier *scoped.UserDefinedServiceAccountQuerier
+	operandDeleter        *finalizers.OperandDeleter
 }
 
 func NewOperator(ctx context.Context, options ...OperatorOption) (*Operator, error) {
@@ -148,6 +148,12 @@ func newOperatorWithConfig(ctx context.Context, config *operatorConfig) (*Operat
 		serviceAccountSyncer:  scoped.NewUserDefinedServiceAccountSyncer(config.logger, scheme, config.operatorClient, config.externalClient),
 		clientAttenuator:      scoped.NewClientAttenuator(config.logger, config.restConfig, config.operatorClient, config.externalClient, nil),
 		serviceAccountQuerier: scoped.NewUserDefinedServiceAccountQuerier(config.logger, config.externalClient),
+		operandDeleter: finalizers.NewOperandDeleter(&finalizers.OperandDeleterDependencies{
+			Logger:                         config.logger,
+			DynamicClient:                  config.dynamicClient,
+			OperatorsV1Alpha1Client:        config.externalClient.OperatorsV1alpha1(),
+			CustomResourceDefinitionLister: lister.APIExtensionsV1().CustomResourceDefinitionLister(),
+		}),
 	}
 
 	// Set up syncing for namespace-scoped resources
@@ -1074,193 +1080,6 @@ func (a *Operator) deleteChild(csv *v1alpha1.ClusterServiceVersion, logger *logr
 	return a.client.OperatorsV1alpha1().ClusterServiceVersions(csv.GetNamespace()).Delete(context.TODO(), csv.GetName(), *metav1.NewDeleteOptions(0))
 }
 
-// updateCleanupFinalizer will set or clear the CSV's cleanup finalizer based on the cleanup spec
-// It also unsets the finalizer when the CSV is in phase=Replacing to prevent CSV deletion from
-// trigerring cleanup during an upgrade.
-// Returns the updated CSV or nil if no update needed
-func (a *Operator) updateCleanupFinalizer(inCSV *v1alpha1.ClusterServiceVersion) *v1alpha1.ClusterServiceVersion {
-	outCSV := inCSV.DeepCopy()
-	hasFinalizer := inCSV.HasFinalizer(CleanupFinalizer)
-
-	// If the CSV is being replaced, remove finalizer and opt-out to prevent cleanup of CRs
-	// before this CSV gets deleted
-	if inCSV.Status.Phase == v1alpha1.CSVPhaseReplacing {
-		if !inCSV.Spec.Cleanup.Enabled && !hasFinalizer {
-			// No update needed as cleanup is already disabled with no finalizer
-			return nil
-		}
-
-		outCSV.RemoveFinalizer(CleanupFinalizer)
-		// We forcefully opt-out of cleanup via the spec to prevent the cleanup finalizer
-		// from being attached again when this CSV moves into the Deleting phase.
-		// TODO: Having the controller update the spec is an anti-pattern.
-		outCSV.Spec.Cleanup.Enabled = false
-		return outCSV
-	}
-
-	// No update if cleanup enabled with finalizer already present, or disabled with no finalizer
-	if inCSV.Spec.Cleanup.Enabled && hasFinalizer || !inCSV.Spec.Cleanup.Enabled && !hasFinalizer {
-		return nil
-	}
-
-	if inCSV.Spec.Cleanup.Enabled && !hasFinalizer {
-		// Add finalizer if missing
-		outCSV.ObjectMeta.Finalizers = append(inCSV.ObjectMeta.Finalizers, CleanupFinalizer)
-	} else if !inCSV.Spec.Cleanup.Enabled && hasFinalizer {
-		// Remove finalizer if not needed
-		outCSV.RemoveFinalizer(CleanupFinalizer)
-	}
-	return outCSV
-}
-
-// parseResourceGroup parses a "resource.group" string into "resource" and "group"
-// Returns an error if a malformed string results in an empty resource or group
-// TODO: Move to some util pkg
-func parseResourceGroup(name string) (resourcePlural string, group string, err error) {
-	rg := strings.SplitN(name, ".", 2)
-	if len(rg) != 2 {
-		err = fmt.Errorf("error parsing CSV name %s: should be of the format 'resource.group'", name)
-		return
-	}
-	if len(rg[0]) == 0 || len(rg[1]) == 0 {
-		err = fmt.Errorf("error parsing CSV name %s: resource(%s) and group(%s) cannot be empty", name, rg[0], rg[1])
-		return
-	}
-	resourcePlural = rg[0]
-	group = rg[1]
-	return
-}
-
-// getCRNamespaces returns the list of target namespaces to look at when cleaning up CRs
-// A cluster-scoped CRD returns a single item list that represents no namespace: [""]
-// A namespace-scoped CRD results in a single/multi/all namespaces list e.g [ns1, ns2, ...]
-func (a *Operator) getCRNamespaces(crdName string, csv *v1alpha1.ClusterServiceVersion) ([]string, error) {
-	var crNamespaces []string
-
-	crd, err := a.opClient.ApiextensionsInterface().ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), crdName, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("error getting CRD %s: %v", crdName, err)
-	}
-
-	// CRD is cluster-scoped
-	if crd.Spec.Scope == apiextensionsv1.ClusterScoped {
-		// We only return the namespace "" for which the CR client uses cluster-scoped requests
-		crNamespaces = append(crNamespaces, "")
-		return crNamespaces, nil
-	}
-
-	// Parse the namespaces list from the CSV's target namespaces annotation
-	targetNamespacesSet := resolver.NewNamespaceSetFromString(csv.Annotations[v1.OperatorGroupTargetsAnnotationKey])
-	if !targetNamespacesSet.IsAllNamespaces() {
-		for ns := range targetNamespacesSet {
-			crNamespaces = append(crNamespaces, ns)
-		}
-		return crNamespaces, nil
-	}
-
-	// All namespaces means olm.targetNamespaces=""
-	// Translate that into the acutal list of all namespaces
-	allNamespaces, err := a.lister.CoreV1().NamespaceLister().List(labels.Everything())
-	if err != nil {
-		return nil, fmt.Errorf("error listing all namespaces: %v", err)
-	}
-
-	for _, ns := range allNamespaces {
-		crNamespaces = append(crNamespaces, ns.Name)
-	}
-
-	return crNamespaces, nil
-}
-
-// runCleanupFinalizer runs the process of cleaning up CRs for the operator
-// and is called when a CSV is pending deletion on the cleanup finalizer.
-// The finalizer is cleared once cleanup finishes or there is an opt-out of cleanup.
-// Returns the CSV if there is an update to the status or finalizer, and nil if unchanged.
-func (a *Operator) runCleanupFinalizer(inCSV *v1alpha1.ClusterServiceVersion) (*v1alpha1.ClusterServiceVersion, error) {
-	outCSV := inCSV.DeepCopy()
-	removeCleanupFinalizer := true
-
-	// For each owned CRD, list and delete all CRs managed by the operator in the operator's target namespaces
-	pendingDeletion := []v1alpha1.ResourceList{}
-	for _, ownedCRD := range inCSV.Spec.CustomResourceDefinitions.Owned {
-		resourcePlural, group, err := parseResourceGroup(ownedCRD.Name)
-		if err != nil {
-			return nil, err
-		}
-
-		rl := v1alpha1.ResourceList{
-			Group:     group,
-			Version:   ownedCRD.Version,
-			Kind:      ownedCRD.Kind,
-			Instances: []v1alpha1.NamespacedName{},
-		}
-
-		// TODO: Add a GVK string method e.g ResourceList.GVK()
-		gvk := rl.Group + "/" + rl.Version + " " + rl.Kind
-
-		// Get the list of target namespaces to look at for cleaning up CRs
-		// This translates olm.targetNamespaces="" to the concrete list of all namespaces
-		// For cluster-scoped CRDs we get [""] which is handled by the CR client as cluster-scoped
-		crNamespaces, err := a.getCRNamespaces(ownedCRD.Name, inCSV)
-		if err != nil {
-			return nil, fmt.Errorf("failed to execute finalizer: error getting CR namespaces: %v", err)
-		}
-
-		for _, ns := range crNamespaces {
-			crList, err := a.opClient.ListCustomResource(group, rl.Version, ns, resourcePlural)
-			if err != nil {
-				return nil, fmt.Errorf("failed to execute finalizer: error listing CRs for type %s: %v", gvk, err)
-			}
-
-			for _, cr := range crList.Items {
-				// Delete the CR if it isn't already pending deletion
-				if cr.GetDeletionTimestamp().IsZero() {
-					err := a.opClient.DeleteCustomResource(group, rl.Version, ns, resourcePlural, cr.GetName())
-					if err != nil && !k8serrors.IsNotFound(err) {
-						return nil, fmt.Errorf("failed to execute finalizer: error deleting CR %s/%s of type %s: %v", cr.GetNamespace(), cr.GetName(), gvk, err)
-					}
-				}
-
-				// We only append a list of N CRs per GVK to display in the cleanup status block: status.cleanup.pendingDeletion
-				// This to prevent the CSV object size from exceeding the etcd enforced limit when there are a significantly large
-				// number of CRs present.
-				// DEBUG: Won't the previous ListCustomResource() operation fail for a sufficiently large number of CRs anyway?
-				if len(rl.Instances) < MaxCRListSize {
-					rl.Instances = append(rl.Instances, v1alpha1.NamespacedName{Name: cr.GetName(), Namespace: cr.GetNamespace()})
-				}
-			}
-
-			// Keep the cleanup finalizer if there is any CR still pending deletion
-			if len(crList.Items) != 0 {
-				removeCleanupFinalizer = false
-			}
-
-		}
-
-		pendingDeletion = append(pendingDeletion, rl)
-	}
-
-	// Clear the cleanup finalizer and status cleanup block if all CRs are deleted
-	if removeCleanupFinalizer {
-		outCSV.RemoveFinalizer(CleanupFinalizer)
-		outCSV.Status.Cleanup.PendingDeletion = []v1alpha1.ResourceList{}
-		return outCSV, nil
-	}
-
-	// TODO: Check if we need to add the cleanup status condition if we haven't already done so?
-
-	// Check if we need to update the cleanup status
-	// DEBUG: Are the instance arrays always ordered the same? If not, this could cause perpetual updates.
-	// Is the CR list order from List() and the existing status block always the same?
-	outCSV.Status.Cleanup.PendingDeletion = pendingDeletion
-	if reflect.DeepEqual(inCSV.Status.Cleanup.PendingDeletion, outCSV.Status.Cleanup.PendingDeletion) {
-		return nil, nil
-	}
-
-	// Return for status update
-	return outCSV, nil
-}
-
 // syncClusterServiceVersion is the method that gets called when we see a CSV event in the cluster
 func (a *Operator) syncClusterServiceVersion(obj interface{}) (syncError error) {
 	clusterServiceVersion, ok := obj.(*v1alpha1.ClusterServiceVersion)
@@ -1289,57 +1108,38 @@ func (a *Operator) syncClusterServiceVersion(obj interface{}) (syncError error) 
 		return
 	}
 
-	// Add or remove the cleanup finalizer based on the cleanup spec
-	// This can also abort an in progress cleanup and unblock CSV deletion
-	// If the CSV is being replaced, it will also be opted out of cleanup
-	if outCSV := a.updateCleanupFinalizer(clusterServiceVersion); outCSV != nil {
-		_, err := a.client.OperatorsV1alpha1().ClusterServiceVersions(outCSV.GetNamespace()).Update(context.TODO(), outCSV, metav1.UpdateOptions{})
-		if err != nil {
-			syncError = fmt.Errorf("failed to update cleanup finalizer: %v", err)
-		}
-		return
-	}
-
-	// Check if the CSV is pending deletion
-	if !clusterServiceVersion.ObjectMeta.DeletionTimestamp.IsZero() {
-		if !clusterServiceVersion.HasFinalizer(CleanupFinalizer) {
-			// Stop reconciliation as the deleted CSV is not pending on the cleanup finalizer
-			return
-		}
-
-		// CSV deletion is blocked on the cleanup finalizer
-		outCSV, err := a.runCleanupFinalizer(clusterServiceVersion)
-		if err != nil {
-			syncError = fmt.Errorf("failed to run cleanup finalizer: %v", err)
-			return
-		}
-		if outCSV == nil {
-			// Still awaiting cleanup and nothing to update on the CSV status
-			// TODO: We'll want to requeue again after some time so we can check on the progress of cleanup
-			// When the CRs we're waiting for finish deletion we won't see a CSV reconcile event
-			// so the CSV finalizer is kept for longer than it needs to be.
-			return
-		}
-
-		// Update the CSV if the cleanup finalizer has been removed
-		if !outCSV.HasFinalizer(CleanupFinalizer) {
-			_, err := a.client.OperatorsV1alpha1().ClusterServiceVersions(outCSV.GetNamespace()).Update(context.TODO(), outCSV, metav1.UpdateOptions{})
-			if err != nil {
-				syncError = fmt.Errorf("error updating ClusterServiceVersion: %v ", err)
-				return
-			}
-			return
-		}
-
-		// Otherwise update the cleanup status
-		_, err = a.client.OperatorsV1alpha1().ClusterServiceVersions(outCSV.GetNamespace()).UpdateStatus(context.TODO(), outCSV, metav1.UpdateOptions{})
-		if err != nil {
-			syncError = fmt.Errorf("error updating ClusterServiceVersion status: %v ", err)
-		}
-		return
-	}
-
 	outCSV, syncError := a.transitionCSVState(*clusterServiceVersion)
+
+	// If necessary, the operand deletion finalizer is processed
+	// after a successful CSV state machine pump in order to
+	// ensure the status is up-to-date.
+	var cleanupStatusUpdated bool
+	if syncError == nil {
+		dupe := outCSV
+		if dupe == nil {
+			dupe = clusterServiceVersion.DeepCopy()
+		}
+
+		var err error
+		cleanupStatusUpdated, err = a.operandDeleter.DeleteOperands(dupe, &dupe.Status.Cleanup)
+		if err != nil {
+			var rq finalizers.NeedsRequeue
+			if errors.As(err, &rq) {
+				logger.WithError(rq).Info("operand deletion not finished")
+				a.csvQueueSet.RequeueAfter(clusterServiceVersion.GetNamespace(), clusterServiceVersion.GetName(), queueinformer.ResyncWithJitter(rq.Delay(), 0.5)())
+			} else {
+				syncError = fmt.Errorf("error processing operand deletion finalizer: %w", err)
+			}
+		}
+
+		if cleanupStatusUpdated {
+			logger.Info("operand cleanup status updated")
+			if outCSV == nil {
+				outCSV = dupe
+			}
+			outCSV.Status.Cleanup = dupe.Status.Cleanup
+		}
+	}
 
 	if outCSV == nil {
 		return
@@ -1349,7 +1149,8 @@ func (a *Operator) syncClusterServiceVersion(obj interface{}) (syncError error) 
 	if !(outCSV.Status.LastUpdateTime.Equal(clusterServiceVersion.Status.LastUpdateTime) &&
 		outCSV.Status.Phase == clusterServiceVersion.Status.Phase &&
 		outCSV.Status.Reason == clusterServiceVersion.Status.Reason &&
-		outCSV.Status.Message == clusterServiceVersion.Status.Message) {
+		outCSV.Status.Message == clusterServiceVersion.Status.Message &&
+		!cleanupStatusUpdated) {
 
 		// Update CSV with status of transition. Log errors if we can't write them to the status.
 		_, err := a.client.OperatorsV1alpha1().ClusterServiceVersions(outCSV.GetNamespace()).UpdateStatus(context.TODO(), outCSV, metav1.UpdateOptions{})
@@ -1493,7 +1294,7 @@ func (a *Operator) operatorGroupFromAnnotations(logger *logrus.Entry, csv *v1alp
 	return operatorGroup
 }
 
-func (a *Operator) operatorGroupForCSV(csv *v1alpha1.ClusterServiceVersion, logger *logrus.Entry) (*v1.OperatorGroup, error) {
+func (a *Operator) operatorGroupForCSV(csv *v1alpha1.ClusterServiceVersion, logger logrus.FieldLogger) (*v1.OperatorGroup, error) {
 	now := a.now()
 
 	// Attempt to associate an OperatorGroup with the CSV.

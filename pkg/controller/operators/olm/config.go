@@ -3,12 +3,11 @@ package olm
 import (
 	"time"
 
-	"github.com/operator-framework/operator-lifecycle-manager/pkg/lib/queueinformer"
-
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilclock "k8s.io/apimachinery/pkg/util/clock"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 
 	configv1client "github.com/openshift/client-go/config/clientset/versioned"
@@ -17,6 +16,7 @@ import (
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/controller/registry/resolver"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/lib/labeler"
 	"github.com/operator-framework/operator-lifecycle-manager/pkg/lib/operatorclient"
+	"github.com/operator-framework/operator-lifecycle-manager/pkg/lib/queueinformer"
 )
 
 type OperatorOption func(*operatorConfig)
@@ -29,6 +29,7 @@ type operatorConfig struct {
 	logger            *logrus.Logger
 	operatorClient    operatorclient.ClientInterface
 	externalClient    versioned.Interface
+	dynamicClient     dynamic.Interface
 	strategyResolver  install.StrategyResolverInterface
 	apiReconciler     resolver.APIIntersectionReconciler
 	apiLabeler        labeler.Labeler
@@ -63,6 +64,8 @@ func (o *operatorConfig) validate() (err error) {
 		err = newInvalidConfigError("operator client", "must not be nil")
 	case o.externalClient == nil:
 		err = newInvalidConfigError("external client", "must not be nil")
+	case o.dynamicClient == nil:
+		err = newInvalidConfigError("dynamic client", "must not be nil")
 	case o.strategyResolver == nil:
 		err = newInvalidConfigError("strategy resolver", "must not be nil")
 	case o.apiReconciler == nil:
@@ -158,5 +161,11 @@ func WithRestConfig(restConfig *rest.Config) OperatorOption {
 func WithConfigClient(configClient configv1client.Interface) OperatorOption {
 	return func(config *operatorConfig) {
 		config.configClient = configClient
+	}
+}
+
+func WithDynamicClient(dynamicClient dynamic.Interface) OperatorOption {
+	return func(config *operatorConfig) {
+		config.dynamicClient = dynamicClient
 	}
 }
