@@ -35,7 +35,7 @@ func (kl kindLogAdapter) Enabled() bool {
 }
 
 func (kl kindLogAdapter) Info(message string) {
-	kl.Infof(message)
+	kl.Infof("%s", message)
 }
 
 func (kl kindLogAdapter) Infof(format string, args ...interface{}) {
@@ -43,7 +43,7 @@ func (kl kindLogAdapter) Infof(format string, args ...interface{}) {
 }
 
 func (kl kindLogAdapter) Warn(message string) {
-	kl.Warnf(message)
+	kl.Warnf("%s", message)
 }
 
 func (kl kindLogAdapter) Warnf(format string, args ...interface{}) {
@@ -51,7 +51,7 @@ func (kl kindLogAdapter) Warnf(format string, args ...interface{}) {
 }
 
 func (kl kindLogAdapter) Error(message string) {
-	kl.Errorf(message)
+	kl.Errorf("%s", message)
 }
 
 func (kl kindLogAdapter) Errorf(format string, args ...interface{}) {
