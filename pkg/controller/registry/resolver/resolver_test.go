@@ -1450,6 +1450,41 @@ func TestSolveOperators_WithSkipsAndStartingCSV(t *testing.T) {
 	require.EqualValues(t, expected, operators)
 }
 
+func TestSolveOperatorsSubscriptionAdoptsInstalledCSV(t *testing.T) {
+	catalog := registry.CatalogKey{Name: "catalog-name", Namespace: "catalog-namespace"}
+
+	csv := existingOperator(catalog.Namespace, "operator-1", "package", "channel", "", nil, nil, nil, nil)
+	csv.Annotations = map[string]string{"operatorframework.io/properties": `{"properties":[{"type":"olm.package","value":{"packageName":"package","version":"1.0.0"}}]}`}
+	csvs := []*v1alpha1.ClusterServiceVersion{csv}
+
+	subs := []*v1alpha1.Subscription{
+		newSub(catalog.Namespace, "package", "channel", catalog),
+	}
+
+	fakeNamespacedOperatorCache := NamespacedOperatorCache{
+		snapshots: map[registry.CatalogKey]*CatalogSnapshot{
+			catalog: {
+				key: catalog,
+				operators: []*Operator{
+					genOperator("operator-2", "2.0.0", "operator-1", "package", "channel", catalog.Name, catalog.Namespace, nil, nil, nil, "", false),
+				},
+			},
+		},
+	}
+
+	logger, _ := test.NewNullLogger()
+	satResolver := SatResolver{
+		cache: getFakeOperatorCache(fakeNamespacedOperatorCache),
+		log:   logger,
+	}
+
+	operators, err := satResolver.SolveOperators([]string{catalog.Namespace}, csvs, subs)
+	require.NoError(t, err)
+	assert.EqualValues(t, OperatorSet{
+		"operator": genOperator("operator-2", "2.0.0", "operator-1", "package", "channel", catalog.Name, catalog.Namespace, nil, nil, nil, "", false),
+	}, operators)
+}
+
 func TestSolveOperators_WithSkips(t *testing.T) {
 	namespace := "olm"
 	catalog := registry.CatalogKey{"community", namespace}
