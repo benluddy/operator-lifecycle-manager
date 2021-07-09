@@ -395,6 +395,7 @@ func (opf OperatorPredicateFunc) Test(o *Operator) bool {
 
 type OperatorPredicate interface {
 	Test(*Operator) bool
+	String() string // human readable msg
 }
 
 func (s *CatalogSnapshot) Find(p ...OperatorPredicate) []*Operator {
@@ -420,11 +421,21 @@ func (f EmptyOperatorFinder) Find(...OperatorPredicate) []*Operator {
 	return nil
 }
 
-func WithCSVName(name string) OperatorPredicate {
-	return OperatorPredicateFunc(func(o *Operator) bool {
-		return o.name == name
-	})
+type csvnamepred string
+
+func (p csvnamepred) Test(o *Operator) bool {
+	return o.name == string(p)
 }
+
+func (p csvnamepred) String() string {
+	return fmt.Sprintf("has name %s", string(p))
+}
+
+// func WithCSVName(name string) OperatorPredicate {
+// 	return OperatorPredicateFunc(func(o *Operator) bool {
+// 		return o.name == name
+// 	})
+// }
 
 func WithChannel(channel string) OperatorPredicate {
 	return OperatorPredicateFunc(func(o *Operator) bool {

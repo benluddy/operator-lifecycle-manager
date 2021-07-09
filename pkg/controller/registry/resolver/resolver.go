@@ -378,7 +378,11 @@ func (r *SatResolver) getBundleInstallables(catalog registry.CatalogKey, predica
 				bundleDependencies = append(bundleDependencies, i.Identifier())
 				bundleStack = append(bundleStack, b)
 			}
-			bundleInstallable.AddDependency(bundleDependencies)
+			bundleInstallable.AddConstraint(PrettyConstraint(
+				solver.Dependency(bundleDependencies...),
+				fmt.Sprintf("bundle %s requires an operator that %s", bundle.name, d.String()),
+			))
+			//			bundleInstallable.AddDependency(bundleDependencies)
 		}
 
 		installables[bundleInstallable.Identifier()] = &bundleInstallable
